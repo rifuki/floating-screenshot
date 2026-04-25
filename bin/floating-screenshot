@@ -33,6 +33,7 @@ APP_ICON = "dev.rifuki.FloatingScreenshot"
 DEFAULT_WIDTH = 326
 DEFAULT_HEIGHT = 246
 SWIPE_SAVE_THRESHOLD = 56
+SWIPE_DISMISS_THRESHOLD = 56
 DRAG_START_THRESHOLD = 18
 SWIPE_VERTICAL_TOLERANCE = 46
 SWIPE_DOMINANCE = 1.35
@@ -334,6 +335,8 @@ class Thumbnail(Gtk.Window):
         self.set_keep_above(True)
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
+        self.set_accept_focus(True)
+        self.set_focus_on_map(True)
         self.stick()
         self.set_type_hint(Gdk.WindowTypeHint.UTILITY)
 
@@ -365,6 +368,14 @@ class Thumbnail(Gtk.Window):
           padding: 2px 7px;
           font-size: 10px;
           font-weight: 700;
+        }
+        #clip-button {
+          color: #0a0e17;
+          background-color: #8bd5ff;
+          border-radius: 999px;
+          padding: 2px 7px;
+          font-size: 10px;
+          font-weight: 800;
         }
         #frame {
           border-radius: 13px;
@@ -415,6 +426,12 @@ class Thumbnail(Gtk.Window):
         title.set_halign(Gtk.Align.START)
         header.pack_start(title, True, True, 2)
 
+        clip_button = Gtk.Button(label="CLIP")
+        clip_button.set_name("clip-button")
+        clip_button.set_tooltip_text("Dismiss preview and keep screenshot only in clipboard/temp")
+        clip_button.connect("clicked", self.on_clip_button)
+        header.pack_start(clip_button, False, False, 0)
+
         self.timer_label = Gtk.Label(label=f"{self.remaining}s")
         self.timer_label.set_name("timer")
         header.pack_start(self.timer_label, False, False, 0)
@@ -438,12 +455,12 @@ class Thumbnail(Gtk.Window):
         image.set_valign(Gtk.Align.CENTER)
         frame.pack_start(image, True, True, 0)
 
-        hint = Gtk.Label(label="Swipe right to save | drag away to share")
+        hint = Gtk.Label(label="Swipe right save | swipe left/CLIP clipboard only")
         hint.set_name("drag-hint")
         hint.set_halign(Gtk.Align.CENTER)
         root.pack_start(hint, False, False, 0)
 
-        footer = Gtk.Label(label="Double-click image to edit | Esc discard")
+        footer = Gtk.Label(label="Drag away to share temp | double-click edit")
         footer.set_name("hint")
         footer.set_halign(Gtk.Align.CENTER)
         root.pack_start(footer, False, False, 0)
@@ -475,6 +492,9 @@ class Thumbnail(Gtk.Window):
         self.connect("key-press-event", self.on_key_press)
         self.connect("delete-event", self.on_delete)
 
+    def on_clip_button(self, _button):
+        self.clipboard_only(show_notification=True)
+
     def on_drag_data_get(self, _widget, _context, selection_data, target_info, _time):
         if target_info == 0:
             selection_data.set_uris([self.path.as_uri()])
@@ -492,7 +512,7 @@ class Thumbnail(Gtk.Window):
 
     def on_preview_press(self, _widget, event):
         if event.button == 3:
-            self.discard()
+            self.clipboard_only(show_notification=True)
             return True
         if event.type == Gdk.EventType._2BUTTON_PRESS and event.button == 1:
             self.save_and_open()
@@ -522,6 +542,16 @@ class Thumbnail(Gtk.Window):
         )
         if is_right_swipe:
             self.save_now(show_notification=True)
+            GLib.timeout_add(80, self.quit)
+            return True
+
+        is_left_swipe = (
+            dx <= -SWIPE_DISMISS_THRESHOLD
+            and ady <= SWIPE_VERTICAL_TOLERANCE
+            and abs(dx) >= ady * SWIPE_DOMINANCE
+        )
+        if is_left_swipe:
+            self.clipboard_only(show_notification=True)
             GLib.timeout_add(80, self.quit)
             return True
 
@@ -565,19 +595,21 @@ class Thumbnail(Gtk.Window):
             if ok:
                 dx = smooth_dx
 
-        # Natural scrolling can invert horizontal deltas. Treat substantial
-        # horizontal movement in either direction as an intentional touchpad
-        # swipe on the thumbnail, because there is no useful horizontal scroll
-        # action inside this tiny preview.
         self.touchpad_swipe_dx += dx
-        if abs(self.touchpad_swipe_dx) >= TOUCHPAD_SWIPE_THRESHOLD:
+        if self.touchpad_swipe_dx >= TOUCHPAD_SWIPE_THRESHOLD:
             self.save_now(show_notification=True)
+            GLib.timeout_add(80, self.quit)
+        elif self.touchpad_swipe_dx <= -TOUCHPAD_SWIPE_THRESHOLD:
+            self.clipboard_only(show_notification=True)
             GLib.timeout_add(80, self.quit)
         return True
 
     def on_key_press(self, _widget, event):
         key_name = Gdk.keyval_name(event.keyval)
         if key_name == "Escape":
+            self.clipboard_only(show_notification=True)
+            return True
+        if key_name in ("Delete", "BackSpace"):
             self.discard()
             return True
         if key_name in ("s", "S"):
@@ -590,7 +622,7 @@ class Thumbnail(Gtk.Window):
         return False
 
     def on_delete(self, *_args):
-        self.discard()
+        self.clipboard_only(show_notification=False)
         return True
 
     def tick(self):
@@ -638,6 +670,20 @@ class Thumbnail(Gtk.Window):
         if not self.completed and self.path.exists():
             self.path.unlink()
         self.completed = True
+        self.quit()
+
+    def clipboard_only(self, show_notification):
+        if self.completed:
+            return
+        self.completed = True
+        if self.path.exists():
+            self.delete_later()
+        if show_notification:
+            notify(
+                "Kept in Clipboard",
+                "Preview dismissed; not saved to Pictures",
+                enabled=self.notifications,
+            )
         self.quit()
 
     def delete_later(self):
@@ -763,6 +809,7 @@ def main():
         notifications=not args.no_notify,
     )
     window.show_all()
+    window.present()
     Gtk.main()
     return 0
 
